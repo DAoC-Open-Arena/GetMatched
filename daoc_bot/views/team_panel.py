@@ -17,21 +17,17 @@ respond to the registered leader of that team.
 
 from __future__ import annotations
 
-import logging
 from typing import TYPE_CHECKING
 
 import discord
 
 from daoc_bot import event_log
 from daoc_bot.config import settings
+from daoc_bot.guild_store import guild_store
 from daoc_bot.models import Team, TeamState
-from daoc_bot.state import store
 
 if TYPE_CHECKING:
     from daoc_bot.engine import MatchmakingEngine
-
-logger = logging.getLogger(__name__)
-
 
 # ── Role helper ───────────────────────────────────────────────────────────────
 
@@ -48,43 +44,38 @@ def has_leader_role(interaction: discord.Interaction) -> bool:
 
 # ── View factory ──────────────────────────────────────────────────────────────
 
-def view_for_state(team: Team, engine: MatchmakingEngine) -> discord.ui.View:
+def view_for_state(
+    team: Team, engine: MatchmakingEngine, guild_id: int
+) -> discord.ui.View:
     """Return the correct button view for the team's current state."""
     if team.state == TeamState.IDLE:
-        return _IdleView(team.name, engine)
+        return _IdleView(team.name, engine, guild_id)
     if team.state == TeamState.READY:
-        return _ReadyView(team.name, engine)
+        return _ReadyView(team.name, engine, guild_id)
     if team.state == TeamState.MATCHED:
         if team.has_accepted:
-            return _MatchedWaitingView(team.name, engine)
-        return _MatchedView(team.name, engine)
+            return _MatchedWaitingView(team.name, engine, guild_id)
+        return _MatchedView(team.name, engine, guild_id)
     if team.state == TeamState.IN_MATCH:
-        return _InMatchView(team.name, engine)
+        return _InMatchView(team.name, engine, guild_id)
     return discord.ui.View()
 
 
 # ── Base view ─────────────────────────────────────────────────────────────────
 
 class _BaseLeaderView(discord.ui.View):
-    """Shared guard logic for all leader panel views.
+    """Shared guard logic for all leader panel views."""
 
-    Args:
-        team_name: Name of the team this panel belongs to.
-        engine:    The :class:`~daoc_bot.engine.MatchmakingEngine` instance.
-    """
-
-    def __init__(self, team_name: str, engine: MatchmakingEngine) -> None:
+    def __init__(
+        self, team_name: str, engine: MatchmakingEngine, guild_id: int
+    ) -> None:
         super().__init__(timeout=None)
         self.team_name = team_name
         self.engine = engine
+        self.guild_id = guild_id
 
     async def _resolve(self, interaction: discord.Interaction) -> Team | None:
-        """Validate role and leadership.
-
-        Returns:
-            The :class:`~daoc_bot.models.Team` on success, or ``None`` if
-            validation failed (an ephemeral error has already been sent).
-        """
+        """Validate role and leadership; return the Team or None on failure."""
         if not has_leader_role(interaction):
             await interaction.response.send_message(
                 f"❌  You need the **{settings.team_leader_role_name}** role.",
@@ -92,7 +83,7 @@ class _BaseLeaderView(discord.ui.View):
             )
             return None
 
-        team = store.get_team(self.team_name)
+        team = guild_store.get_team(self.guild_id, self.team_name)
         if not team:
             await interaction.response.send_message(
                 "❌  Team not found — it may have been removed by an admin.",
@@ -133,19 +124,18 @@ class _IdleView(_BaseLeaderView):
             return
 
         team.state = TeamState.READY
-        store.enqueue(team.name)
+        guild_store.enqueue(self.guild_id, team.name)
+        guild_store.save_team(self.guild_id, team)
 
-        event_log.queue_entered(team.name)
-        logger.info("%s queued. Queue: %s", team.name, store.queue)
+        event_log.queue_entered(self.guild_id, team.name, group_size=team.group_size)
 
         await interaction.response.defer()
-        await self.engine.update_team_panel(team)
-        await self.engine.try_match()
+        await self.engine.update_team_panel(self.guild_id, team)
+        await self.engine.try_match(self.guild_id)
 
         # If still waiting after the first try, arm the MMR-relaxation timer
-        # so the engine retries with a wider window after MMR_RELAX_SECONDS.
         if team.state == TeamState.READY:
-            self.engine.schedule_mmr_relax(team.name)
+            self.engine.schedule_mmr_relax(self.guild_id, team.name)
 
 
 class _ReadyView(_BaseLeaderView):
@@ -168,12 +158,13 @@ class _ReadyView(_BaseLeaderView):
             return
 
         team.state = TeamState.IDLE
-        store.dequeue(team.name)
-        self.engine._cancel_mmr_relax(team.name)
-        event_log.queue_left(team.name, reason="unready")
+        guild_store.dequeue(self.guild_id, team.name)
+        guild_store.save_team(self.guild_id, team)
+        self.engine._cancel_mmr_relax(self.guild_id, team.name)
+        event_log.queue_left(self.guild_id, team.name, reason="unready", group_size=team.group_size)
 
         await interaction.response.defer()
-        await self.engine.update_team_panel(team)
+        await self.engine.update_team_panel(self.guild_id, team)
 
 
 class _MatchedView(_BaseLeaderView):
@@ -197,7 +188,7 @@ class _MatchedView(_BaseLeaderView):
             )
             return
 
-        match = store.get_match(team.current_match_id or "")
+        match = guild_store.get_match(self.guild_id, team.current_match_id or "")
         if not match:
             await interaction.response.send_message(
                 "❌  Match not found — it may have timed out.", ephemeral=True
@@ -205,7 +196,7 @@ class _MatchedView(_BaseLeaderView):
             return
 
         await interaction.response.defer()
-        await self.engine.accept_match(match, team.name)
+        await self.engine.accept_match(self.guild_id, match, team.name)
 
 
 class _MatchedWaitingView(_BaseLeaderView):
@@ -224,12 +215,7 @@ class _MatchedWaitingView(_BaseLeaderView):
 
 
 class _InMatchView(_BaseLeaderView):
-    """Shown while a match is active.
-
-    Both buttons call :meth:`~daoc_bot.engine.MatchmakingEngine.end_match`.
-    The first leader to click determines the outcome for both teams — their
-    ELO ratings are updated immediately and the match is closed.
-    """
+    """Shown while a match is active."""
 
     @discord.ui.button(
         label="🏆  We Won",
@@ -244,7 +230,7 @@ class _InMatchView(_BaseLeaderView):
         if not team:
             return
 
-        match = store.get_match(team.current_match_id or "")
+        match = guild_store.get_match(self.guild_id, team.current_match_id or "")
         if not match or not match.active:
             await interaction.response.send_message(
                 "❌  No active match found — it may already be closed.",
@@ -252,10 +238,11 @@ class _InMatchView(_BaseLeaderView):
             )
             return
 
-        # Guard against double-click / race with the other leader
         match.active = False
         await interaction.response.defer()
-        await self.engine.end_match(match, ended_by=team.name, winner_name=team.name)
+        await self.engine.end_match(
+            self.guild_id, match, ended_by=team.name, winner_name=team.name
+        )
 
     @discord.ui.button(
         label="💀  We Lost",
@@ -270,7 +257,7 @@ class _InMatchView(_BaseLeaderView):
         if not team:
             return
 
-        match = store.get_match(team.current_match_id or "")
+        match = guild_store.get_match(self.guild_id, team.current_match_id or "")
         if not match or not match.active:
             await interaction.response.send_message(
                 "❌  No active match found — it may already be closed.",
@@ -278,12 +265,11 @@ class _InMatchView(_BaseLeaderView):
             )
             return
 
-        # The opponent is the winner
         opponent_name = (
             match.team2_name if team.name == match.team1_name else match.team1_name
         )
         match.active = False
         await interaction.response.defer()
         await self.engine.end_match(
-            match, ended_by=team.name, winner_name=opponent_name
+            self.guild_id, match, ended_by=team.name, winner_name=opponent_name
         )

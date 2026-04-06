@@ -10,7 +10,7 @@
 
 - [ ] Bot is running (`python -m daoc_bot`)
 - [ ] `#matchmaking` channel exists and is visible to the bot
-- [ ] `simulate.py` passes with no errors (`python simulate.py`)
+- [ ] `simulate.py` passes with no errors (`python scripts/simulate.py`)
 - [ ] You have access to at least 2 Discord accounts (alt, friend, or browser session)
 
 ---
@@ -194,7 +194,7 @@
 Run immediately before the event starts:
 
 ```
-python simulate.py
+python scripts/simulate.py
 ```
 
 All scenarios must pass. If any fail, do not start the event until fixed.

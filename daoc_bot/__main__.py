@@ -7,15 +7,20 @@ Run with::
 Or directly::
 
     python daoc_bot/__main__.py
-
-The module wires together the bot instance, logging, command registration,
-and the ``on_ready`` event handler, then starts the Discord gateway connection.
 """
 
 from __future__ import annotations
 
 import logging
+import os
+import sys
 from typing import Any
+
+# Kill switch — set RUN_BOT=false in Railway's environment variables tab to
+# take the bot offline without stopping the Railway service entirely.
+if os.getenv("RUN_BOT", "true").strip().lower() != "true":
+    print("RUN_BOT is not 'true' — bot disabled. Exiting cleanly.")
+    sys.exit(0)
 
 import discord
 from discord import app_commands
@@ -23,7 +28,9 @@ from discord.ext import commands
 
 from daoc_bot import commands as cmd_module
 from daoc_bot.config import settings
+from daoc_bot.db import init_db
 from daoc_bot.engine import MatchmakingEngine
+from daoc_bot.guild_store import guild_store
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 
@@ -56,9 +63,18 @@ cmd_module.register(bot, engine)
 
 @bot.event
 async def on_ready() -> None:
-    """Sync slash commands and verify the matchmaking channel on startup."""
+    """Initialise DB, sync slash commands, and recover per-guild state."""
     assert bot.user is not None  # always true after on_ready
     logger.info("Logged in as %s (ID: %d)", bot.user, bot.user.id)
+    logger.info("TEAM_LEADER_ROLE_NAME = %r", settings.team_leader_role_name)
+
+    # Initialise PostgreSQL (no-op if tables already exist; safe to call every restart)
+    init_db(settings.database_url)
+
+    # Recover in-memory queue state for every guild this bot is in
+    for guild in bot.guilds:
+        guild_store.recover_guild(guild.id)
+        logger.info("Guild recovered: %s (ID: %d)", guild.name, guild.id)
 
     try:
         synced = await bot.tree.sync()
@@ -66,22 +82,6 @@ async def on_ready() -> None:
     except Exception as exc:  # pragma: no cover
         logger.error("Failed to sync commands: %s", exc)
 
-    matchmaking_channel = bot.get_channel(settings.matchmaking_channel_id)
-    if matchmaking_channel:
-        logger.info("Matchmaking channel: #%s (ID: %d)", matchmaking_channel, settings.matchmaking_channel_id)
-    else:
-        logger.warning(
-            "Matchmaking channel ID %d not found — check MATCHMAKING_CHANNEL_ID.",
-            settings.matchmaking_channel_id,
-        )
-    broadcast_channel = bot.get_channel(settings.broadcast_channel_id)
-    if broadcast_channel:
-        logger.info("Broadcast channel: #%s (ID: %d)", broadcast_channel, settings.broadcast_channel_id)
-    else:
-        logger.warning(
-            "Broadcast ID %d not found — check BROADCAST_CHANNEL_ID.",
-            settings.matchmaking_channel_id,
-        )
     # ── Debug: channel visibility & permissions ──────────────────────────────
     logger.info("---- Channel access debug ----")
 
@@ -95,7 +95,6 @@ async def on_ready() -> None:
 
         for channel in guild.text_channels:
             perms = channel.permissions_for(bot_member)
-
             logger.info(
                 " #%s | view=%s read=%s send=%s",
                 channel.name,
@@ -105,50 +104,14 @@ async def on_ready() -> None:
             )
 
     logger.info("---- End channel access debug ----")
-    
-    # ── Debug: thread + mention capabilities ────────────────────────────────
-    logger.info("---- Thread & mention debug ----")
 
-    for guild in bot.guilds:
-        logger.info("Guild: %s (ID: %d)", guild.name, guild.id)
 
-        bot_member = guild.me
-        if bot_member is None:
-            continue
+@bot.event
+async def on_guild_join(guild: discord.Guild) -> None:
+    """Recover state when the bot joins a new guild (or re-joins after downtime)."""
+    guild_store.recover_guild(guild.id)
+    logger.info("Joined guild: %s (ID: %d) — state recovered.", guild.name, guild.id)
 
-        for channel in guild.text_channels:
-            perms = channel.permissions_for(bot_member)
-
-            can_use = perms.view_channel and perms.send_messages
-
-            if not can_use:
-                continue  # skip irrelevant channels
-
-            logger.info(
-                " #%s | create_private_threads=%s create_public_threads=%s send_in_threads=%s mention_everyone=%s",
-                channel.name,
-                perms.create_private_threads,
-                perms.create_public_threads,
-                perms.send_messages_in_threads,
-                perms.mention_everyone,
-            )
-    
-    # ── Debug: test thread creation in matchmaking channel ──────────────────
-    if isinstance(matchmaking_channel, discord.TextChannel):
-        try:
-            thread = await matchmaking_channel.create_thread(
-                name="debug-thread",
-                type=discord.ChannelType.private_thread,
-            )
-
-            await thread.send("✅ Thread creation works")
-
-            logger.info("Successfully created private thread in #%s", matchmaking_channel.name)
-
-            await thread.delete()
-
-        except Exception as e:
-            logger.error("Thread creation FAILED in #%s: %s", matchmaking_channel.name, e)
 
 @bot.event
 async def on_error(event: str, *args: Any, **kwargs: Any) -> None:

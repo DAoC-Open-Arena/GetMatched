@@ -10,9 +10,9 @@ The real :class:`~daoc_bot.engine.MatchmakingEngine` is used with a fresh
 
 Usage::
 
-    python simulate.py                   # all scenarios
-    python simulate.py --scenario basic  # single scenario
-    python simulate.py --verbose         # dump channel message log after each run
+    python scripts/simulate.py                   # all scenarios
+    python scripts/simulate.py --scenario basic  # single scenario
+    python scripts/simulate.py --verbose         # dump channel message log after each run
 
 Available scenarios
 -------------------
