@@ -40,6 +40,12 @@ logs/*.jsonl
 logs/*.log
 *.log
 
+# ── Database / runtime artefacts ────────────────────────────────────────────────
+# SQLite (local dev fallback)
+*.db
+*.db-shm
+*.db-wal
+
 # ── IDE ─────────────────────────────────────────────────────────────────────────
 .idea/
 .vscode/

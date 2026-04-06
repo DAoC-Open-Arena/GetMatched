@@ -71,6 +71,7 @@ class Team:
     has_accepted: bool = False
     panel_thread_id: int | None = None
     panel_message_id: int | None = None
+    group_size: int = 1
 
 
 @dataclass

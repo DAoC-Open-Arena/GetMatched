@@ -1,0 +1,7 @@
+[build]
+builder = "nixpacks"
+
+[deploy]
+startCommand = "python -m daoc_bot"
+restartPolicyType = "on_failure"
+restartPolicyMaxRetries = 5
